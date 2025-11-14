@@ -2,7 +2,7 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
-
+import matplotlib.pyplot as plt  # <-- IMPORTANTE: Añadido para graficar
 
 @dataclass
 class IOEvent:
@@ -118,6 +118,59 @@ class SchedulerResult:
             avg_tat, avg_wt, avg_rt
         ))
 
+    # --- ¡NUEVA FUNCIÓN! ---
+    def plot_gantt(self, title: str):
+        """Usa Matplotlib para dibujar el diagrama de Gantt."""
+        
+        fig, ax = plt.subplots(figsize=(10, 5))
+        
+        # Mapear PIDs a posiciones en el eje Y
+        pids = sorted(list(set(p.pid for p in self.processes)))
+        y_pos = {pid: i * 10 for i, pid in enumerate(pids)}
+        
+        # Colores para los procesos
+        colors = plt.cm.get_cmap('Set3', len(pids))
+        pid_colors = {pid: colors(i) for i, pid in enumerate(pids)}
+
+        for entry in self.gantt:
+            pid = entry.pid
+            start = entry.start
+            duration = entry.end - entry.start
+            
+            # Dibujamos la barra horizontal
+            # broken_barh([(inicio, duración)], (y_min, y_height))
+            ax.broken_barh(
+                [(start, duration)], 
+                (y_pos[pid], 8), 
+                facecolors=(pid_colors[pid]),
+                edgecolor='black'
+            )
+            
+            # Añadimos texto (PID) dentro de la barra si hay espacio
+            if duration > 0:
+                ax.text(start + duration / 2, y_pos[pid] + 4, pid, 
+                        ha='center', va='center', color='black', fontsize=8)
+
+        # Configuración del gráfico
+        ax.set_xlabel('Tiempo')
+        ax.set_ylabel('Procesos')
+        ax.set_title(f'Diagrama de Gantt - {title}')
+        
+        # Ponemos los nombres de los procesos en el eje Y
+        ax.set_yticks([pos + 4 for pos in y_pos.values()])
+        ax.set_yticklabels(pids)
+        
+        # Invertimos el eje Y para que P1 esté arriba (opcional)
+        ax.invert_yaxis()
+        
+        ax.grid(True, linestyle='--', alpha=0.6)
+        
+        # Aseguramos que el eje X empiece en 0
+        ax.set_xlim(left=0)
+        
+        # Mostramos el gráfico
+        plt.show()
+
 
 class BaseScheduler:
     """Clase base con utilidades comunes."""
@@ -216,7 +269,8 @@ class FIFOScheduler(BaseScheduler):
             
             start = time
             end = time + consume
-            gantt.append(GanttEntry(p.pid, start, end))
+            if consume > 0: # Solo registrar si hubo ejecución real
+                gantt.append(GanttEntry(p.pid, start, end))
 
             # Avanzar el tiempo y actualizar estado del proceso
             time = end
@@ -244,14 +298,11 @@ class FIFOScheduler(BaseScheduler):
                 p.last_ready_enter = time
                 ready.append(p)
 
-            # --- CORRECCIÓN CLAVE ---
             # 6. Actualizar E/S de procesos bloqueados MIENTRAS 'p' corría
-            # 'p' consumió 'consume' tiempo. Ese tiempo debe restarse
-            # a todos los procesos que estaban en 'blocked'.
-            if blocked:
+            if blocked and consume > 0:
                 new_blocked = []
                 for pb, rem in blocked:
-                    rem -= consume  # <-- ESTA ES LA CORRECCIÓN (antes era rem -= 0)
+                    rem -= consume  
                     if rem <= 0:
                         # E/S terminada. Entra a 'ready' en 'time'
                         pb.last_ready_enter = time
@@ -331,16 +382,13 @@ class RRScheduler(BaseScheduler):
                 p.start_time = time
 
             # 4. Calcular cuánto va a correr (¡Aquí cambia!)
-            # Determinar cuánto consumir: lo mínimo entre:
-            #   a) El quantum
-            #   b) El tiempo hasta la próxima E/S
-            #   c) Lo que le queda de burst
             to_io = p.consumes_to_next_io()
             run_time = min(self.quantum, to_io, p.remaining)
             
             start = time
             end = time + run_time
-            gantt.append(GanttEntry(p.pid, start, end))
+            if run_time > 0: # Solo registrar si hubo ejecución real
+                gantt.append(GanttEntry(p.pid, start, end))
 
             # Avanzar
             time = end
@@ -355,7 +403,6 @@ class RRScheduler(BaseScheduler):
                     break
             
             # Re-ingresar nuevos procesos que pudieron llegar *justo* ahora
-            # (Importante en RR para que no se "cuelen" en la cola)
             while arrival_idx < len(arrivals) and arrivals[arrival_idx].arrival <= time:
                 p_new = arrivals[arrival_idx]
                 p_new.last_ready_enter = time
@@ -377,15 +424,12 @@ class RRScheduler(BaseScheduler):
                 ready.append(p)
 
             # 6. Actualizar E/S de procesos bloqueados MIENTRAS 'p' corría
-            # (Esta lógica estaba bien en tu original)
-            if blocked:
+            if blocked and run_time > 0:
                 new_blocked = []
                 for pb, rem in blocked:
                     rem -= run_time # Restamos lo que 'p' usó de CPU
                     if rem <= 0:
                         pb.last_ready_enter = time
-                        # OJO: Si varios terminan E/S a la vez, RR los mete
-                        # en el orden en que los revise aquí.
                         ready.append(pb)
                     else:
                         new_blocked.append((pb, rem))
@@ -420,11 +464,13 @@ def run_comparison(process_list: List[Process], quantum: int):
     fifo = FIFOScheduler(deepcopy(process_list))
     res_fifo = fifo.run()
     res_fifo.print_summary()
+    res_fifo.plot_gantt("FIFO")  # <-- AÑADIDO: Muestra el gráfico FIFO
 
     print("\n--- RR (quantum = {}) ---".format(quantum))
     rr = RRScheduler(deepcopy(process_list), quantum)
     res_rr = rr.run()
     res_rr.print_summary()
+    res_rr.plot_gantt(f"Round Robin (Q={quantum})") # <-- AÑADIDO: Muestra el gráfico RR
 
 
 # Punto de entrada principal
