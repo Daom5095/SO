@@ -14,69 +14,82 @@ class IOEvent:
 
 @dataclass
 class Process:
+    """Modela un proceso con sus tiempos y estado de simulación."""
     pid: str
     arrival: int           # tiempo de llegada al sistema
     burst: int             # tiempo total de CPU requerido (ráfaga total)
     io_events: List[IOEvent] = field(default_factory=list)  # lista de eventos de E/S ordenada por 'at'
-    # Campos de simulación (mutarán durante la ejecución)
-    remaining: int = field(init=False)
+    
+    # --- Campos de simulación (mutarán durante la ejecución) ---
+    remaining: int = field(init=False)  # cuánto tiempo de CPU le queda
     executed: int = field(init=False, default=0)  # CPU consumida hasta ahora
-    start_time: Optional[int] = field(init=False, default=None)  # primer vez que recibió CPU
-    finish_time: Optional[int] = field(init=False, default=None)
-    waiting_time: int = field(init=False, default=0)  # total acumulado en ready
+    start_time: Optional[int] = field(init=False, default=None)  # primer vez que recibió CPU (para Response Time)
+    finish_time: Optional[int] = field(init=False, default=None) # cuándo terminó (para Turnaround Time)
+    waiting_time: int = field(init=False, default=0)  # total acumulado en 'ready' (para Waiting Time)
     last_ready_enter: Optional[int] = field(init=False, default=None)  # para cálculo de espera incremental
 
     def __post_init__(self):
+        """Se ejecuta después de crear la instancia."""
         self.remaining = self.burst
-        # asegurar orden de io_events por 'at'
+        # Aseguramos que los eventos de E/S estén ordenados por 'at'
         self.io_events.sort(key=lambda e: e.at)
 
     def next_io(self) -> Optional[IOEvent]:
-        """Devuelve el siguiente evento de E/S que aún no ocurrió (según executed)."""
+        """Devuelve el siguiente evento de E/S que aún no ocurrió (según 'executed')."""
         for ev in self.io_events:
             if ev.at > self.executed:
                 return ev
-            # if ev.at == self.executed: it means occurs immediately after executing this unit
         return None
 
     def consumes_to_next_io(self) -> int:
         """Cuántas unidades puede consumir hasta que ocurra la próxima petición de E/S.
-        Retorna al menos 1 (si no hay IO devuelve remaining)."""
+        Retorna al menos 1 (si no hay IO devuelve 'remaining')."""
         ev = self.next_io()
         if ev is None:
+            # Si no hay más E/S, puede consumir todo lo que le queda
             return self.remaining
-        # si next io.at > executed, podemos consumir hasta that - executed (pero no más que remaining)
-        return max(0, min(self.remaining, ev.at - self.executed))
+        
+        # Cuánto falta para la siguiente E/S
+        time_to_next_event = ev.at - self.executed
+        # Puede consumir lo que le falte para la E/S, pero sin pasarse de lo que le queda en total
+        return max(0, min(self.remaining, time_to_next_event))
 
 
 @dataclass
 class GanttEntry:
+    """Una entrada simple para el diagrama de Gantt."""
     pid: str
     start: int
     end: int
 
 
 class SchedulerResult:
+    """Clase contenedora para los resultados de la simulación."""
     def __init__(self, gantt: List[GanttEntry], processes: List[Process], total_time: int):
         self.gantt = gantt
         self.processes = processes
         self.total_time = total_time
 
     def metrics(self) -> Tuple[dict, dict, dict]:
-        """Calcula métricas: turnaround, waiting, response por pid."""
+        """Calcula métricas clave: turnaround, waiting, response por pid."""
         tat = {}
         wt = {}
         rt = {}
         for p in self.processes:
+            # Turnaround Time: (Finalización - Llegada)
             TAT = (p.finish_time - p.arrival) if p.finish_time is not None else None
+            # Waiting Time: Ya lo fuimos acumulando en p.waiting_time
             WT = p.waiting_time
+            # Response Time: (Primera Ejecución - Llegada)
             RT = (p.start_time - p.arrival) if p.start_time is not None else None
+            
             tat[p.pid] = TAT
             wt[p.pid] = WT
             rt[p.pid] = RT
         return tat, wt, rt
 
     def print_summary(self):
+        """Imprime un resumen legible de los resultados y métricas."""
         tat, wt, rt = self.metrics()
         print("Gantt (pid: start-end):")
         for entry in self.gantt:
@@ -87,13 +100,20 @@ class SchedulerResult:
         for p in sorted(self.processes, key=lambda x: x.pid):
             print("{:<6} {:>10} {:>10} {:>10}".format(
                 p.pid,
-                tat[p.pid],
-                wt[p.pid],
-                rt[p.pid]
+                tat[p.pid] or "N/A",
+                wt[p.pid] or "N/A",
+                rt[p.pid] or "N/A"
             ))
-        avg_tat = sum(v for v in tat.values()) / len(tat)
-        avg_wt = sum(v for v in wt.values()) / len(wt)
-        avg_rt = sum(v for v in rt.values()) / len(rt)
+        
+        # Calcular promedios (ignorando N/A)
+        valid_tats = [v for v in tat.values() if v is not None]
+        valid_wts = [v for v in wt.values() if v is not None]
+        valid_rts = [v for v in rt.values() if v is not None]
+
+        avg_tat = sum(valid_tats) / len(valid_tats) if valid_tats else 0
+        avg_wt = sum(valid_wts) / len(valid_wts) if valid_wts else 0
+        avg_rt = sum(valid_rts) / len(valid_rts) if valid_rts else 0
+        
         print("\nPromedios: Turnaround = {:.2f}, Waiting = {:.2f}, Response = {:.2f}".format(
             avg_tat, avg_wt, avg_rt
         ))
@@ -102,7 +122,8 @@ class SchedulerResult:
 class BaseScheduler:
     """Clase base con utilidades comunes."""
     def __init__(self, processes: List[Process]):
-        # recibimos procesos iniciales; trabajamos con copias para no modificar originales
+        # Recibimos procesos iniciales; trabajamos con copias (deepcopy)
+        # para no modificar la lista original y poder comparar algoritmos
         self.init_processes = deepcopy(processes)
 
     def run(self) -> SchedulerResult:
@@ -110,122 +131,142 @@ class BaseScheduler:
 
 
 class FIFOScheduler(BaseScheduler):
-    """FIFO / FCFS: atiende en orden de llegada. Un proceso corre hasta terminar o hasta pedir E/S."""
+    """FIFO / FCFS: Atiende en orden de llegada. 
+    Un proceso corre hasta terminar o hasta pedir E/S (no apropiativo)."""
+    
     def run(self) -> SchedulerResult:
         procs = deepcopy(self.init_processes)
-        time = 0
-        ready = deque()
-        blocked: List[Tuple[Process, int]] = []  # (process, remaining_io_time)
+        time = 0  # Reloj global de la simulación
+        
+        # Colas de estado
+        ready = deque()  # Cola de procesos listos (usamos deque por eficiencia al sacar del inicio)
+        blocked: List[Tuple[Process, int]] = []  # Lista de (proceso, tiempo_restante_E/S)
         finished: List[Process] = []
+        
         gantt: List[GanttEntry] = []
 
-        # ordenar arrivals
+        # Lista de procesos ordenada por llegada para saber cuándo meterlos
         arrivals = sorted(procs, key=lambda p: p.arrival)
         arrival_idx = 0
         n = len(procs)
 
+        # Bucle principal: corre hasta que todos los procesos hayan terminado
         while len(finished) < n:
-            # traer procesos que llegan en 'time'
+            
+            # 1. Ingresar nuevos procesos
+            # Traer a 'ready' todos los procesos que hayan llegado en el 'time' actual
             while arrival_idx < len(arrivals) and arrivals[arrival_idx].arrival <= time:
                 p = arrivals[arrival_idx]
-                p.last_ready_enter = time
+                p.last_ready_enter = time  # Marcamos cuándo entró a 'ready'
                 ready.append(p)
                 arrival_idx += 1
 
-            # si no hay ocupación de CPU y no hay listos, avanzar tiempo hasta la siguiente llegada o hasta que un bloqueado termine
+            # 2. Manejar tiempo ocioso (CPU vacía)
+            # Si no hay procesos listos ('ready' está vacía)
             if not ready:
-                # avanzar al menor evento (next arrival o next io completion)
+                # Si no hay listos Y no hay más por llegar Y no hay nada bloqueado, terminamos
+                if arrival_idx == len(arrivals) and not blocked:
+                    break 
+                
+                # Avanzar 'time' al próximo evento (la próxima llegada o el fin de una E/S)
                 next_times = []
                 if arrival_idx < len(arrivals):
                     next_times.append(arrivals[arrival_idx].arrival)
                 if blocked:
-                    next_times.append(time + min(bt for (_, bt) in blocked))
+                    # El próximo fin de E/S es 'time' + el mínimo 'rem' de los bloqueados
+                    next_times.append(time + min(rem for (_, rem) in blocked))
+                
                 if not next_times:
-                    break
+                    break # Seguridad, no debería pasar si el bucle while está bien
+                
                 next_time = min(next_times)
-                # reducir tiempos de E/S durante el salto
-                leap = next_time - time
-                # actualizar bloqueados
+                leap = next_time - time # El tiempo que saltamos
+                
+                # Actualizar bloqueados durante el salto de tiempo ocioso
                 new_blocked = []
                 for pb, rem in blocked:
                     rem -= leap
                     if rem <= 0:
-                        # E/S terminada, entrar a ready
+                        # E/S terminada, entrar a 'ready' en 'next_time'
                         pb.last_ready_enter = next_time
                         ready.append(pb)
                     else:
                         new_blocked.append((pb, rem))
                 blocked = new_blocked
-                time = next_time
-                continue
+                
+                time = next_time # Avanzamos el reloj global
+                continue # Volvemos al inicio del bucle para re-evaluar (pueden llegar nuevos)
 
-            # tomar primer proceso listo
+            # 3. Tomar proceso de 'ready'
+            # Si llegamos aquí, hay procesos en 'ready'. Tomamos el primero (FIFO)
             p = ready.popleft()
-            # contabilizar espera desde que entró al ready hasta ahora
+            
+            # Contabilizar espera: (tiempo actual - última vez que entró a ready)
             if p.last_ready_enter is not None:
                 p.waiting_time += time - p.last_ready_enter
                 p.last_ready_enter = None
+            
+            # Marcar tiempo de inicio (si es la primera vez)
             if p.start_time is None:
                 p.start_time = time
 
-            # cuánto puede consumir hasta la próxima E/S (o remaining)
+            # 4. Calcular cuánto va a correr
+            # En FIFO, corre hasta la próxima E/S o hasta que termine
             consume = p.consumes_to_next_io()
-            # consumir todo ese bloque (o lo que reste)
+            
             start = time
             end = time + consume
-            # registrar en Gantt
             gantt.append(GanttEntry(p.pid, start, end))
 
-            # avanzar el tiempo y actualizar ejecutado/remaining
+            # Avanzar el tiempo y actualizar estado del proceso
             time = end
             p.executed += consume
             p.remaining -= consume
 
-            # comprobar si ocurrió E/S justo tras esto (es decir, next_io.at == executed)
+            # 5. Decidir qué pasó al final de la ráfaga
             next_io = None
-            # find IO whose at == executed (it should be the next one if any and at == executed)
             for ev in p.io_events:
                 if ev.at == p.executed:
                     next_io = ev
                     break
 
             if next_io and p.remaining > 0:
-                # pasar a bloqueado por la duración indicada
+                # A. Pidió E/S: Pasa a bloqueado
+                # Se añade con su duración total. El bucle (6) la reducirá.
                 blocked.append((p, next_io.duration))
             elif p.remaining == 0:
-                # terminó
+                # B. Terminó
                 p.finish_time = time
                 finished.append(p)
             else:
-                # no IO y no terminado? debería indicar que remaining==0 handled above; but if not, volver a ready
+                # C. No debería pasar en FIFO (si no hay E/S y no terminó, 'consume' sería 0?)
+                # Por si acaso, lo devolvemos a 'ready'
                 p.last_ready_enter = time
                 ready.append(p)
 
-            # durante el avance, también disminuir tiempo de E/S de bloqueados que se solapan con el salto
-            # (ya fueron descontados porque avanzamos tiempo en bloque).
-            # Necesitamos revisar bloqueados y mover a ready si rem <= 0 (ya hecho en 'if not ready' salto),
-            # pero aquí sólo reducimos en función de 'consume' (si no hubo salto previo)
+            # --- CORRECCIÓN CLAVE ---
+            # 6. Actualizar E/S de procesos bloqueados MIENTRAS 'p' corría
+            # 'p' consumió 'consume' tiempo. Ese tiempo debe restarse
+            # a todos los procesos que estaban en 'blocked'.
             if blocked:
                 new_blocked = []
                 for pb, rem in blocked:
-                    rem -= 0  # ya no hay desplazamiento necesario; el main time advanced accounted for process
-                    # However: if multiple processes were blocked during time advance above, we've already updated then.
+                    rem -= consume  # <-- ESTA ES LA CORRECCIÓN (antes era rem -= 0)
                     if rem <= 0:
+                        # E/S terminada. Entra a 'ready' en 'time'
                         pb.last_ready_enter = time
                         ready.append(pb)
                     else:
                         new_blocked.append((pb, rem))
                 blocked = new_blocked
 
-        # any remaining blocked processes should finish IO and then be scheduled - but loop runs until finished==n
-        # finalize: collect final process states (finished + possibly those finished earlier)
-        all_finished = finished + [p for p in procs if p.finish_time is not None and p not in finished]
-        # ensure we return all processes in the result (use original pids order)
         return SchedulerResult(gantt, procs, time)
 
 
 class RRScheduler(BaseScheduler):
-    """Round Robin: quantum preemptivo. Un proceso puede ser interrumpido por E/S, por quantum agotado o por finalización."""
+    """Round Robin: Apropiativo por 'quantum'.
+    Un proceso puede ser interrumpido por E/S, por finalización o por quantum agotado."""
+    
     def __init__(self, processes: List[Process], quantum: int):
         super().__init__(processes)
         self.quantum = quantum
@@ -243,25 +284,31 @@ class RRScheduler(BaseScheduler):
         n = len(procs)
 
         while len(finished) < n:
-            # traer llegadas
+            
+            # 1. Ingresar nuevos procesos (igual que FIFO)
             while arrival_idx < len(arrivals) and arrivals[arrival_idx].arrival <= time:
                 p = arrivals[arrival_idx]
                 p.last_ready_enter = time
                 ready.append(p)
                 arrival_idx += 1
 
+            # 2. Manejar tiempo ocioso (igual que FIFO)
             if not ready:
-                # avanzar al siguiente evento (llegada o terminación de E/S)
+                if arrival_idx == len(arrivals) and not blocked:
+                    break
+                    
                 next_times = []
                 if arrival_idx < len(arrivals):
                     next_times.append(arrivals[arrival_idx].arrival)
                 if blocked:
                     next_times.append(time + min(bt for (_, bt) in blocked))
+                
                 if not next_times:
                     break
+                
                 next_time = min(next_times)
                 leap = next_time - time
-                # actualizar bloqueados durante el salto
+                
                 new_blocked = []
                 for pb, rem in blocked:
                     rem -= leap
@@ -274,53 +321,71 @@ class RRScheduler(BaseScheduler):
                 time = next_time
                 continue
 
-            # sacar el siguiente listo (RR)
+            # 3. Tomar proceso de 'ready' (igual que FIFO, saca del inicio)
             p = ready.popleft()
-            # contabilizar espera
+            
             if p.last_ready_enter is not None:
                 p.waiting_time += time - p.last_ready_enter
                 p.last_ready_enter = None
             if p.start_time is None:
                 p.start_time = time
 
-            # determinar cuánto consumir: min(quantum, until next IO, remaining)
+            # 4. Calcular cuánto va a correr (¡Aquí cambia!)
+            # Determinar cuánto consumir: lo mínimo entre:
+            #   a) El quantum
+            #   b) El tiempo hasta la próxima E/S
+            #   c) Lo que le queda de burst
             to_io = p.consumes_to_next_io()
             run_time = min(self.quantum, to_io, p.remaining)
+            
             start = time
             end = time + run_time
             gantt.append(GanttEntry(p.pid, start, end))
 
-            # avanzar
+            # Avanzar
             time = end
             p.executed += run_time
             p.remaining -= run_time
 
-            # comprobar si IO ocurre ahora
+            # 5. Decidir qué pasó al final de la ráfaga
             next_io = None
             for ev in p.io_events:
                 if ev.at == p.executed:
                     next_io = ev
                     break
+            
+            # Re-ingresar nuevos procesos que pudieron llegar *justo* ahora
+            # (Importante en RR para que no se "cuelen" en la cola)
+            while arrival_idx < len(arrivals) and arrivals[arrival_idx].arrival <= time:
+                p_new = arrivals[arrival_idx]
+                p_new.last_ready_enter = time
+                ready.append(p_new)
+                arrival_idx += 1
 
-            if next_io and p.remaining > 0:
-                # pasa a bloqueado
+            if next_io and p.remaining > 0 and run_time == to_io:
+                # A. Pidió E/S (se cumple to_io <= quantum)
                 blocked.append((p, next_io.duration))
             elif p.remaining == 0:
+                # B. Terminó (se cumple p.remaining <= quantum y <= to_io)
                 p.finish_time = time
                 finished.append(p)
             else:
-                # fue preempted por quantum (o to_io > quantum)
+                # C. Se acabó el quantum (o justo coincidió quantum y E/S/Fin)
+                # Si no terminó y no pidió E/S, fue apropiado por quantum
+                # Vuelve al final de la cola 'ready'
                 p.last_ready_enter = time
                 ready.append(p)
 
-            # reducir tiempos de E/S de bloqueados (ya avanzado por 'run_time' en el clock)
+            # 6. Actualizar E/S de procesos bloqueados MIENTRAS 'p' corría
+            # (Esta lógica estaba bien en tu original)
             if blocked:
                 new_blocked = []
                 for pb, rem in blocked:
-                    rem -= 0  # rem already accounted by time variable advancement earlier when no ready
-                    rem -= run_time
+                    rem -= run_time # Restamos lo que 'p' usó de CPU
                     if rem <= 0:
                         pb.last_ready_enter = time
+                        # OJO: Si varios terminan E/S a la vez, RR los mete
+                        # en el orden en que los revise aquí.
                         ready.append(pb)
                     else:
                         new_blocked.append((pb, rem))
@@ -334,6 +399,7 @@ class RRScheduler(BaseScheduler):
 # ---------------------------
 
 def example_processes() -> List[Process]:
+    """Define los procesos de prueba."""
     return [
         Process(pid="P1", arrival=0, burst=10, io_events=[IOEvent(at=4, duration=3)]),
         Process(pid="P2", arrival=2, burst=6, io_events=[IOEvent(at=3, duration=2)]),
@@ -343,21 +409,25 @@ def example_processes() -> List[Process]:
 
 
 def run_comparison(process_list: List[Process], quantum: int):
+    """Ejecuta ambos simuladores e imprime la comparación."""
     print("Procesos iniciales:")
     for p in process_list:
         ios = ", ".join(f"(at={ev.at},dur={ev.duration})" for ev in p.io_events) or "sin IO"
         print(f"  {p.pid}: llegada={p.arrival}, burst={p.burst}, IOs={ios}")
+    
     print("\n--- FIFO ---")
-    fifo = FIFOScheduler(process_list)
+    # Usamos deepcopy para asegurar que FIFO no afecte la lista para RR
+    fifo = FIFOScheduler(deepcopy(process_list))
     res_fifo = fifo.run()
     res_fifo.print_summary()
 
     print("\n--- RR (quantum = {}) ---".format(quantum))
-    rr = RRScheduler(process_list, quantum)
+    rr = RRScheduler(deepcopy(process_list), quantum)
     res_rr = rr.run()
     res_rr.print_summary()
 
 
+# Punto de entrada principal
 if __name__ == "__main__":
     procs = example_processes()
     run_comparison(procs, quantum=3)
